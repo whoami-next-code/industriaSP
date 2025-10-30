@@ -1,0 +1,82 @@
+/*
+  Utilidades para validar RUC peruano y obtener datos básicos desde SUNAT.
+  - validarRUC: verifica longitud (11) y dígito verificador usando ponderaciones [5,4,3,2,7,6,5,4,3,2].
+  - obtenerDatosPorRUC: intenta consultar un endpoint público configurable y, si falla, devuelve datos simulados.
+
+  Nota: Para producción se recomienda usar un proveedor oficial o un servicio propio con caché.
+*/
+
+export function validarRUC(ruc: string): boolean {
+  const clean = (ruc || '').replace(/[^0-9]/g, '');
+  if (clean.length !== 11) return false;
+  // Ponderaciones para los 10 primeros dígitos
+  const weights = [5,4,3,2,7,6,5,4,3,2];
+  let sum = 0;
+  for (let i = 0; i < 10; i++) {
+    const d = Number(clean[i]);
+    if (Number.isNaN(d)) return false;
+    sum += d * weights[i];
+  }
+  const remainder = sum % 11;
+  let check = 11 - remainder;
+  if (check === 10) check = 0;
+  if (check === 11) check = 1;
+  const last = Number(clean[10]);
+  return check === last;
+}
+
+export type DatosRUC = {
+  ruc: string;
+  razonSocial: string;
+  nombreComercial?: string;
+  direccion?: string;
+  estado?: string;
+};
+
+/**
+ * Obtiene datos básicos de SUNAT por RUC.
+ * Usa variables de entorno opcionales:
+ *  - SUNAT_API_BASE: base URL del proveedor (por ejemplo, https://apiperu.dev/api)
+ *  - API_TOKEN_SUNAT: token de autenticación si el proveedor lo requiere
+ */
+export async function obtenerDatosPorRUC(ruc: string): Promise<DatosRUC | null> {
+  const clean = (ruc || '').replace(/[^0-9]/g, '');
+  if (!validarRUC(clean)) return null;
+
+  const base = process.env.SUNAT_API_BASE?.replace(/\/$/, '') || '';
+  const token = process.env.API_TOKEN_SUNAT || process.env.API_TOKEN_RENIEC || '';
+
+  // Intento con proveedor público si hay base configurada
+  if (base) {
+    const url = `${base}/ruc/${clean}`;
+    try {
+      const res = await fetch(url, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        // Normalización defensiva
+        const razon = data?.razonSocial || data?.nombre_o_razon_social || data?.data?.nombre_o_razon_social;
+        const comercio = data?.nombreComercial || data?.data?.nombre_comercial;
+        const direccion = data?.direccion || data?.data?.direccion;
+        const estado = data?.estado || data?.data?.estado;
+        if (razon) {
+          return { ruc: clean, razonSocial: String(razon), nombreComercial: comercio ? String(comercio) : undefined, direccion: direccion ? String(direccion) : undefined, estado: estado ? String(estado) : undefined };
+        }
+      }
+    } catch (err) {
+      // Ignorar y seguir al fallback
+      console.warn('obtenerDatosPorRUC: error consultando proveedor', err);
+    }
+  }
+
+  // Fallback: datos simulados
+  return {
+    ruc: clean,
+    razonSocial: 'Empresa Demo S.A.C.',
+    nombreComercial: 'Industrias Demo',
+    direccion: 'Av. Ejemplo 123, Lima',
+    estado: 'ACTIVO',
+  };
+}
+

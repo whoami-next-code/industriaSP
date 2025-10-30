@@ -1,0 +1,42 @@
+# Root ignores for IndustriaSP monorepo (frontend, admin, backend)
+
+# Node.js
+node_modules/
+**/node_modules/
+
+# Build outputs
+dist/
+**/dist/
+.next/
+**/.next/
+coverage/
+**/coverage/
+.turbo/
+.vercel/
+
+# Environment & local DB
+.env
+backend/.env
+frontend/.env.local
+backend/dev.sqlite
+
+# Logs & temp
+*.log
+**/*.log
+temp_admin_design/
+
+# Uploads/media generated
+backend/public/uploads/
+
+# Large/binary artifacts not needed in VCS
+*.zip
+*.fig
+admin.zip
+pagina web.zip
+
+# Laravel vendor/cache within admin template
+admin/oculux-minimal-laravel/vendor/
+admin/oculux-minimal-laravel/storage/
+admin/oculux-minimal-laravel/bootstrap/cache/
+admin/oculux-minimal-laravel/node_modules/
+
