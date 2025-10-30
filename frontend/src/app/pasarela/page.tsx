@@ -1,0 +1,801 @@
+"use client";
+import React, { useMemo, useState, useEffect } from "react";
+import { loadStripe } from "@stripe/stripe-js";
+import { Elements, CardElement, useStripe, useElements } from "@stripe/react-stripe-js";
+import axios from "axios";
+import { useCart } from "@/components/cart/CartContext";
+import { useRouter, useSearchParams } from "next/navigation";
+import { 
+  CreditCard, 
+  Truck, 
+  Shield, 
+  CheckCircle, 
+  AlertCircle, 
+  ArrowLeft,
+  Clock,
+  MapPin,
+  User,
+  FileText,
+  ShoppingCart
+} from "lucide-react";
+import DocumentInput from '@/components/DocumentInput';
+
+const stripePromise = loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLIC_KEY || "");
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001";
+
+function validarRUC(ruc: string) {
+  const clean = (ruc || '').replace(/[^0-9]/g, '');
+  if (clean.length !== 11) return false;
+  const w = [5,4,3,2,7,6,5,4,3,2];
+  let sum = 0; 
+  for (let i=0;i<10;i++){ 
+    const d = Number(clean[i]); 
+    if (Number.isNaN(d)) return false; 
+    sum += d*w[i]; 
+  }
+  const r = sum % 11; 
+  let c = 11 - r; 
+  if (c===10) c=0; 
+  if (c===11) c=1; 
+  return c === Number(clean[10]);
+}
+
+function validarDNI(dni: string) {
+  const clean = (dni || '').replace(/[^0-9]/g, '');
+  return clean.length === 8;
+}
+
+type PaymentMethod = 'card' | 'cash_on_delivery';
+
+function CheckoutForm() {
+  const stripe = useStripe();
+  const elements = useElements();
+  const { items, total, isHydrated, clear } = useCart();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  
+  // Estados principales
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('card');
+  const [ruc, setRuc] = useState("");
+  const [dni, setDni] = useState("");
+  const [documentType, setDocumentType] = useState<'dni' | 'ruc'>('dni');
+  const [customerName, setCustomerName] = useState("");
+  const [customerPhone, setCustomerPhone] = useState("");
+  const [shippingAddress, setShippingAddress] = useState("");
+  
+  const [customerData, setCustomerData] = useState({
+    name: '',
+    email: '',
+    phone: '',
+    dni: '',
+    address: ''
+  });
+  const [documentValidation, setDocumentValidation] = useState({
+    isValid: false,
+    documentType: null as 'DNI' | 'RUC' | null
+  });
+  
+  // Estados de UI
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [success, setSuccess] = useState(false);
+  const [factura, setFactura] = useState<any | null>(null);
+  const [result, setResult] = useState<any | null>(null);
+  
+  // Estados de validación
+  const [documentError, setDocumentError] = useState("");
+  const [nameError, setNameError] = useState("");
+  const [phoneError, setPhoneError] = useState("");
+  const [addressError, setAddressError] = useState("");
+
+  // Recuperar datos del sessionStorage
+  useEffect(() => {
+    const orderSummary = sessionStorage.getItem("last_order_summary");
+    if (orderSummary) {
+      try {
+        const data = JSON.parse(orderSummary);
+        if (data.shippingAddress) {
+          setShippingAddress(data.shippingAddress);
+        }
+      } catch (e) {
+        console.warn("Error parsing order summary:", e);
+      }
+    }
+  }, []);
+
+  const itemsPayload = useMemo(() => items.map(it => ({
+    productId: it.productId,
+    nombre: it.name,
+    precioUnitario: it.price,
+    cantidad: it.quantity,
+  })), [items]);
+
+  // Validaciones
+  const validateDocument = () => {
+    // Usar el resultado del nuevo componente DocumentInput
+    if (!documentValidation.isValid) {
+      // Mensaje acorde al tipo detectado
+      const msg = documentValidation.documentType === 'DNI'
+        ? 'DNI inválido'
+        : documentValidation.documentType === 'RUC'
+          ? 'RUC inválido'
+          : 'Documento inválido';
+      setDocumentError(msg);
+      return false;
+    }
+    setDocumentError("");
+    return true;
+  };
+
+  const validateName = () => {
+    if (!customerName.trim() || customerName.trim().length < 2) {
+      setNameError("Nombre completo es obligatorio");
+      return false;
+    }
+    setNameError("");
+    return true;
+  };
+
+  const validatePhone = () => {
+    if (!customerPhone.trim() || customerPhone.trim().length < 9) {
+      setPhoneError("Teléfono debe tener al menos 9 dígitos");
+      return false;
+    }
+    setPhoneError("");
+    return true;
+  };
+
+  const validateAddress = () => {
+    if (!shippingAddress.trim() || shippingAddress.trim().length < 10) {
+      setAddressError("Dirección debe tener al menos 10 caracteres");
+      return false;
+    }
+    setAddressError("");
+    return true;
+  };
+
+  const validateForm = () => {
+    const isDocumentValid = validateDocument();
+    const isNameValid = validateName();
+    const isPhoneValid = validatePhone();
+    const isAddressValid = validateAddress();
+    
+    return isDocumentValid && isNameValid && isPhoneValid && isAddressValid;
+  };
+
+  // Pago con tarjeta
+  async function handleCardPayment(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    
+    if (!isHydrated) { 
+      setError("El carrito se está cargando, intenta de nuevo."); 
+      return; 
+    }
+    
+    if (!stripe || !elements) { 
+      setError("Stripe no está listo."); 
+      return; 
+    }
+    
+    if (items.length === 0) { 
+      setError("Tu carrito está vacío."); 
+      return; 
+    }
+
+    if (!validateForm()) {
+      setError("Por favor corrige los errores en el formulario");
+      return;
+    }
+
+    setLoading(true);
+    
+    try {
+      // 1) Crear intento de pago en backend
+      const document = documentType === 'dni' ? dni : ruc;
+      const resp = await axios.post(`${API_BASE}/api/pagos/intento`, { 
+        ruc: document, 
+        items: itemsPayload,
+        customerData: {
+          name: customerName,
+          phone: customerPhone,
+          address: shippingAddress,
+          documentType,
+          document
+        }
+      });
+      
+      const data = resp.data;
+      if (!data?.ok) { 
+        throw new Error(data?.error || "No se pudo iniciar el pago"); 
+      }
+      
+      setFactura(data.factura);
+
+      // 2) Confirmar el pago con Stripe Elements
+      const card = elements.getElement(CardElement);
+      if (!card) throw new Error("No se encontró el elemento de tarjeta");
+
+      const { error: stripeErr, paymentIntent } = await stripe.confirmCardPayment(data.clientSecret, {
+        payment_method: { card },
+      });
+
+      if (stripeErr) throw stripeErr;
+      
+      setResult(paymentIntent);
+      setSuccess(true);
+      clear();
+      
+      // Redirigir a página de confirmación después de 3 segundos
+      setTimeout(() => {
+        router.push(`/confirmacion?paymentId=${paymentIntent.id}&method=card`);
+      }, 3000);
+      
+    } catch (err: any) {
+      setError(err?.message || "Error realizando el pago");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Pago contra entrega
+  async function handleCashOnDelivery(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    
+    if (items.length === 0) { 
+      setError("Tu carrito está vacío."); 
+      return; 
+    }
+
+    if (!validateForm()) {
+      setError("Por favor corrige los errores en el formulario");
+      return;
+    }
+
+    setLoading(true);
+    
+    try {
+      // Crear pedido con pago contra entrega
+      const document = documentType === 'dni' ? dni : ruc;
+      const resp = await axios.post(`${API_BASE}/api/pedidos/contra-entrega`, {
+        items: itemsPayload,
+        customerData: {
+          name: customerName,
+          phone: customerPhone,
+          address: shippingAddress,
+          documentType,
+          document
+        },
+        total: total
+      });
+      
+      const data = resp.data;
+      if (!data?.ok) { 
+        throw new Error(data?.error || "No se pudo crear el pedido"); 
+      }
+      
+      setSuccess(true);
+      clear();
+      
+      // Redirigir a página de confirmación
+      setTimeout(() => {
+        router.push(`/confirmacion?orderId=${data.orderId}&method=cash_on_delivery`);
+      }, 3000);
+      
+    } catch (err: any) {
+      setError(err?.response?.data?.message || err?.message || "Error creando el pedido");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (success) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-green-50 to-green-100 flex items-center justify-center">
+        <div className="bg-white rounded-xl shadow-lg p-8 max-w-md w-full mx-4">
+          <div className="text-center">
+            <CheckCircle className="h-16 w-16 text-green-500 mx-auto mb-4" />
+            <h2 className="text-2xl font-bold text-gray-900 mb-2">
+              {paymentMethod === 'card' ? '¡Pago Exitoso!' : '¡Pedido Confirmado!'}
+            </h2>
+            <p className="text-gray-600 mb-4">
+              {paymentMethod === 'card' 
+                ? 'Tu pago ha sido procesado correctamente.'
+                : 'Tu pedido ha sido registrado. Pagarás al recibir el producto.'
+              }
+            </p>
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-500 mx-auto"></div>
+            <p className="text-sm text-gray-500 mt-2">Redirigiendo...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+      <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8 py-8">
+        {/* Header */}
+        <div className="mb-8">
+          <button
+            onClick={() => router.back()}
+            className="flex items-center text-gray-600 hover:text-gray-900 mb-4"
+          >
+            <ArrowLeft className="h-4 w-4 mr-2" />
+            Volver al carrito
+          </button>
+          
+          <div className="flex items-center gap-2 mb-4">
+            <CreditCard className="h-6 w-6 text-blue-600" />
+            <h1 className="text-3xl font-bold text-gray-900">Finalizar Compra</h1>
+          </div>
+          
+          {/* Indicadores de progreso */}
+          <div className="flex items-center justify-center space-x-4 mb-6">
+            <div className="flex items-center">
+              <div className="flex items-center justify-center w-8 h-8 bg-green-600 text-white rounded-full text-sm font-medium">
+                ✓
+              </div>
+              <span className="ml-2 text-sm font-medium text-green-600">Carrito</span>
+            </div>
+            <div className="w-16 h-0.5 bg-blue-600"></div>
+            <div className="flex items-center">
+              <div className="flex items-center justify-center w-8 h-8 bg-blue-600 text-white rounded-full text-sm font-medium">
+                2
+              </div>
+              <span className="ml-2 text-sm font-medium text-blue-600">Pago</span>
+            </div>
+            <div className="w-16 h-0.5 bg-gray-300"></div>
+            <div className="flex items-center">
+              <div className="flex items-center justify-center w-8 h-8 bg-gray-300 text-gray-500 rounded-full text-sm font-medium">
+                3
+              </div>
+              <span className="ml-2 text-sm font-medium text-gray-500">Confirmación</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Mensaje de error */}
+        {error && (
+          <div className="mb-6 p-4 rounded-lg border-l-4 bg-red-50 border-red-400 text-red-700">
+            <div className="flex items-center">
+              <AlertCircle className="h-5 w-5 mr-2" />
+              <p className="font-medium">{error}</p>
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          {/* Columna principal - Formulario */}
+          <div className="lg:col-span-2 space-y-6">
+            {/* Selección de método de pago */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-200">
+                <h3 className="text-lg font-semibold text-gray-900">Método de Pago</h3>
+              </div>
+              <div className="p-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <button
+                    type="button"
+                    onClick={() => setPaymentMethod('card')}
+                    className={`p-4 border-2 rounded-lg transition-all ${
+                      paymentMethod === 'card'
+                        ? 'border-blue-500 bg-blue-50'
+                        : 'border-gray-200 hover:border-gray-300'
+                    }`}
+                  >
+                    <div className="flex items-center justify-center mb-2">
+                      <CreditCard className="h-8 w-8 text-blue-600" />
+                    </div>
+                    <h4 className="font-medium text-gray-900">Tarjeta de Crédito/Débito</h4>
+                    <p className="text-sm text-gray-600 mt-1">Pago inmediato y seguro</p>
+                  </button>
+                  
+                  <button
+                    type="button"
+                    onClick={() => setPaymentMethod('cash_on_delivery')}
+                    className={`p-4 border-2 rounded-lg transition-all ${
+                      paymentMethod === 'cash_on_delivery'
+                        ? 'border-green-500 bg-green-50'
+                        : 'border-gray-200 hover:border-gray-300'
+                    }`}
+                  >
+                    <div className="flex items-center justify-center mb-2">
+                      <Truck className="h-8 w-8 text-green-600" />
+                    </div>
+                    <h4 className="font-medium text-gray-900">Contra Entrega</h4>
+                    <p className="text-sm text-gray-600 mt-1">Paga al recibir el producto</p>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Información del cliente */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-200">
+                <h3 className="text-lg font-semibold text-gray-900 flex items-center">
+                  <User className="h-5 w-5 mr-2 text-blue-600" />
+                  Información del Cliente
+                </h3>
+              </div>
+              <div className="p-6 space-y-4">
+                {/* Tipo de documento */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Tipo de Documento *
+                  </label>
+                  <div className="flex space-x-4">
+                    <label className="flex items-center">
+                      <input
+                        type="radio"
+                        value="dni"
+                        checked={documentType === 'dni'}
+                        onChange={(e) => setDocumentType(e.target.value as 'dni' | 'ruc')}
+                        className="mr-2"
+                      />
+                      DNI (Persona Natural)
+                    </label>
+                    <label className="flex items-center">
+                      <input
+                        type="radio"
+                        value="ruc"
+                        checked={documentType === 'ruc'}
+                        onChange={(e) => setDocumentType(e.target.value as 'dni' | 'ruc')}
+                        className="mr-2"
+                      />
+                      RUC (Empresa)
+                    </label>
+                  </div>
+                </div>
+
+                {/* Documento */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    {documentType === 'dni' ? 'DNI *' : 'RUC *'}
+                  </label>
+                  <DocumentInput
+                    value={documentType === 'dni' ? dni : ruc}
+                    onChange={(val) => {
+                      if (documentType === 'dni') {
+                        setDni(val);
+                      } else {
+                        setRuc(val);
+                      }
+                      if (documentError) validateDocument();
+                    }}
+                    onValidationChange={(isValid, detectedType) => {
+                      setDocumentValidation({ isValid, documentType: detectedType });
+                      // Ajustar el tipo seleccionado automáticamente para reducir fricción
+                      if (detectedType === 'DNI' && documentType !== 'dni') {
+                        setDocumentType('dni');
+                      }
+                      if (detectedType === 'RUC' && documentType !== 'ruc') {
+                        setDocumentType('ruc');
+                      }
+                      // Actualizar mensaje de error en vivo
+                      if (!isValid) {
+                        const msg = detectedType === 'DNI'
+                          ? 'DNI inválido'
+                          : detectedType === 'RUC'
+                            ? 'RUC inválido'
+                            : 'Documento inválido';
+                        setDocumentError(msg);
+                      } else {
+                        setDocumentError('');
+                      }
+                    }}
+                    placeholder={documentType === 'dni' ? '12345678' : '20123456789'}
+                  />
+                  {documentError && (
+                    <p className="mt-1 text-sm text-red-600">{documentError}</p>
+                  )}
+                </div>
+
+                {/* Nombre completo */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Nombre Completo *
+                  </label>
+                  <input
+                    type="text"
+                    value={customerName}
+                    onChange={(e) => {
+                      setCustomerName(e.target.value);
+                      if (nameError) validateName();
+                    }}
+                    className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${
+                      nameError ? 'border-red-300' : 'border-gray-300'
+                    }`}
+                    placeholder="Juan Pérez García"
+                    required
+                  />
+                  {nameError && (
+                    <p className="mt-1 text-sm text-red-600">{nameError}</p>
+                  )}
+                </div>
+
+                {/* Teléfono */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Teléfono *
+                  </label>
+                  <input
+                    type="tel"
+                    value={customerPhone}
+                    onChange={(e) => {
+                      setCustomerPhone(e.target.value);
+                      if (phoneError) validatePhone();
+                    }}
+                    className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${
+                      phoneError ? 'border-red-300' : 'border-gray-300'
+                    }`}
+                    placeholder="987654321"
+                    required
+                  />
+                  {phoneError && (
+                    <p className="mt-1 text-sm text-red-600">{phoneError}</p>
+                  )}
+                </div>
+
+                {/* Dirección */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    <MapPin className="h-4 w-4 inline mr-1" />
+                    Dirección de Entrega *
+                  </label>
+                  <textarea
+                    value={shippingAddress}
+                    onChange={(e) => {
+                      setShippingAddress(e.target.value);
+                      if (addressError) validateAddress();
+                    }}
+                    rows={3}
+                    className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ${
+                      addressError ? 'border-red-300' : 'border-gray-300'
+                    }`}
+                    placeholder="Av. Principal 123, Distrito, Provincia, Departamento"
+                    required
+                  />
+                  {addressError && (
+                    <p className="mt-1 text-sm text-red-600">{addressError}</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Formulario de pago específico */}
+            {paymentMethod === 'card' && (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-200">
+                  <h3 className="text-lg font-semibold text-gray-900 flex items-center">
+                    <CreditCard className="h-5 w-5 mr-2 text-blue-600" />
+                    Datos de la Tarjeta
+                  </h3>
+                </div>
+                <div className="p-6">
+                  <form onSubmit={handleCardPayment}>
+                    <div className="mb-4">
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Información de la Tarjeta *
+                      </label>
+                      <div className="border rounded-lg p-3 bg-gray-50">
+                        <CardElement 
+                          options={{ 
+                            style: { 
+                              base: { 
+                                fontSize: '16px',
+                                color: '#374151',
+                                '::placeholder': {
+                                  color: '#9CA3AF',
+                                },
+                              } 
+                            } 
+                          }} 
+                        />
+                      </div>
+                    </div>
+                    
+                    <button
+                      type="submit"
+                      disabled={loading || !stripe || !elements}
+                      className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-medium py-3 px-4 rounded-lg transition-colors duration-200 flex items-center justify-center"
+                    >
+                      {loading ? (
+                        <>
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                          Procesando Pago...
+                        </>
+                      ) : (
+                        <>
+                          <Shield className="h-4 w-4 mr-2" />
+                          Pagar ${total.toFixed(2)}
+                        </>
+                      )}
+                    </button>
+                  </form>
+                </div>
+              </div>
+            )}
+
+            {paymentMethod === 'cash_on_delivery' && (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-200">
+                  <h3 className="text-lg font-semibold text-gray-900 flex items-center">
+                    <Truck className="h-5 w-5 mr-2 text-green-600" />
+                    Pago Contra Entrega
+                  </h3>
+                </div>
+                <div className="p-6">
+                  <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
+                    <div className="flex items-start">
+                      <Clock className="h-5 w-5 text-green-600 mt-0.5 mr-3" />
+                      <div>
+                        <h4 className="font-medium text-green-800">Información Importante</h4>
+                        <ul className="text-sm text-green-700 mt-2 space-y-1">
+                          <li>• Pagarás en efectivo al recibir tu pedido</li>
+                          <li>• El delivery te contactará antes de la entrega</li>
+                          <li>• Tiempo de entrega: 2-5 días hábiles</li>
+                          <li>• Ten el monto exacto preparado: ${total.toFixed(2)}</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <form onSubmit={handleCashOnDelivery}>
+                    <button
+                      type="submit"
+                      disabled={loading}
+                      className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-medium py-3 px-4 rounded-lg transition-colors duration-200 flex items-center justify-center"
+                    >
+                      {loading ? (
+                        <>
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                          Confirmando Pedido...
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle className="h-4 w-4 mr-2" />
+                          Confirmar Pedido (Pago Contra Entrega)
+                        </>
+                      )}
+                    </button>
+                  </form>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Sidebar - Resumen */}
+          <div className="space-y-6">
+            {/* Resumen del pedido */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-200">
+                <h3 className="text-lg font-semibold text-gray-900">Resumen del Pedido</h3>
+              </div>
+              <div className="p-6">
+                {items.length === 0 ? (
+                  <div className="text-center text-gray-500 py-4">
+                    <ShoppingCart className="h-12 w-12 mx-auto mb-2 text-gray-300" />
+                    <p>No tienes productos en el carrito</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <ul className="space-y-3">
+                      {items.map(item => (
+                        <li key={item.productId} className="flex items-center justify-between text-sm">
+                          <div className="flex-1">
+                            <span className="font-medium text-gray-900 block" title={item.name}>
+                              {item.name}
+                            </span>
+                            <span className="text-gray-500">Cantidad: {item.quantity}</span>
+                          </div>
+                          <span className="font-medium text-gray-900">
+                            ${(item.price * item.quantity).toFixed(2)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    
+                    <div className="border-t pt-4 space-y-2">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-600">Subtotal:</span>
+                        <span className="font-medium">${total.toFixed(2)}</span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-600">Envío:</span>
+                        <span className="font-medium text-green-600">Gratis</span>
+                      </div>
+                      <div className="flex justify-between text-lg font-bold text-gray-900 border-t pt-2">
+                        <span>Total:</span>
+                        <span className="text-blue-600">${total.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Elementos de confianza */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+              <h4 className="text-sm font-semibold text-gray-900 mb-4 flex items-center">
+                <Shield className="h-4 w-4 mr-2 text-green-600" />
+                Compra Segura
+              </h4>
+              <div className="space-y-3 text-sm text-gray-600">
+                <div className="flex items-center">
+                  <CheckCircle className="h-4 w-4 text-green-500 mr-2" />
+                  <span>Transacciones encriptadas</span>
+                </div>
+                <div className="flex items-center">
+                  <CheckCircle className="h-4 w-4 text-green-500 mr-2" />
+                  <span>Datos protegidos</span>
+                </div>
+                <div className="flex items-center">
+                  <CheckCircle className="h-4 w-4 text-green-500 mr-2" />
+                  <span>Garantía de entrega</span>
+                </div>
+                <div className="flex items-center">
+                  <CheckCircle className="h-4 w-4 text-green-500 mr-2" />
+                  <span>Soporte 24/7</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Información de entrega */}
+            <div className="bg-blue-50 rounded-xl border border-blue-200 p-6">
+              <h4 className="text-sm font-semibold text-blue-900 mb-4 flex items-center">
+                <Truck className="h-4 w-4 mr-2" />
+                Información de Entrega
+              </h4>
+              <div className="space-y-2 text-sm text-blue-800">
+                <p>• Entrega gratuita en toda Lima</p>
+                <p>• Tiempo estimado: 2-5 días hábiles</p>
+                <p>• Seguimiento en tiempo real</p>
+                <p>• Horario: Lunes a Sábado 9am-6pm</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Factura preliminar */}
+        {factura && (
+          <div className="mt-8 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-200">
+              <h3 className="text-lg font-semibold text-gray-900 flex items-center">
+                <FileText className="h-5 w-5 mr-2 text-blue-600" />
+                Factura Preliminar
+              </h3>
+            </div>
+            <div className="p-6">
+              <pre className="text-xs text-gray-700 whitespace-pre-wrap overflow-x-auto bg-gray-50 p-4 rounded-lg">
+                {JSON.stringify(factura, null, 2)}
+              </pre>
+            </div>
+          </div>
+        )}
+
+        {/* Resultado del pago */}
+        {result?.status === 'succeeded' && (
+          <div className="mt-8 bg-green-50 border border-green-200 rounded-xl p-6">
+            <div className="flex items-center">
+              <CheckCircle className="h-6 w-6 text-green-600 mr-3" />
+              <div>
+                <h3 className="text-lg font-semibold text-green-800">Pago Confirmado</h3>
+                <p className="text-sm text-green-700">ID de transacción: {result.id}</p>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function Page() {
+  return (
+    <Elements stripe={stripePromise}>
+      <CheckoutForm />
+    </Elements>
+  );
+}

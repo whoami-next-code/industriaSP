@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+/* Paleta base de marca (modo claro por defecto) */
+:root {
+  --brand-primary: #111827; /* azul grisáceo profundo, legible */
+  --brand-secondary: #2563eb; /* azul vibrante para CTAs */
+  --surface: #f7f7f8; /* fondo general claro */
+  --surface-card: #ffffff; /* tarjetas y secciones */
+  --text: #111111; /* texto principal */
+  --text-muted: #4b5563; /* texto secundario */
+}
+
+@theme inline {
+  --color-background: var(--surface);
+  --color-foreground: var(--text);
+  --font-sans: var(--font-industrial-sans);
+  --font-heading: var(--font-industrial-condensed);
+}
+
+/* Evitamos forzar modo oscuro por media query para mantener la identidad visual */
+/* Si se desea, se puede implementar un toggler con .theme-dark en el futuro */
+
+body {
+  background-color: var(--surface);
+  color: var(--text);
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+}
+
+/* Accesibilidad: foco visible para usuarios de teclado */
+:focus-visible {
+  outline: 3px solid var(--brand-secondary);
+  outline-offset: 2px;
+}
+
+/* Utilidades de color orientadas a la paleta */
+.text-muted { color: var(--text-muted); }
+.bg-surface { background-color: var(--surface); }
+.bg-card { background-color: var(--surface-card); }
+.text-brand { color: var(--brand-primary); }
+.btn-primary { background-color: var(--brand-secondary); color: #fff; }
+
+/* Encabezados con estilo más industrial (condensed) */
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading), var(--font-sans), Arial, Helvetica, sans-serif;
+  letter-spacing: 0.01em;
+}
