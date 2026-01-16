@@ -3,12 +3,18 @@ import { AppModule } from './app.module';
 import helmet from 'helmet';
 import { ValidationPipe } from '@nestjs/common';
 import * as express from 'express';
-import { join } from 'path';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // ===== DEBUG INICIAL (CRÍTICO PARA RAILWAY) =====
+  console.log('🚀 Bootstrap started');
+  console.log('ENV PORT:', process.env.PORT);
+  console.log('NODE_ENV:', process.env.NODE_ENV);
+  console.log('CORS_ORIGINS:', process.env.CORS_ORIGINS);
 
-  // Configurar Helmet con políticas más permisivas para archivos estáticos
+  const app = await NestFactory.create(AppModule);
+  console.log('✅ Nest app created');
+
+  // ===== HELMET =====
   app.use(
     helmet({
       crossOriginResourcePolicy: { policy: 'cross-origin' },
@@ -24,52 +30,50 @@ async function bootstrap() {
       },
     }),
   );
+  console.log('✅ Helmet configured');
 
+  // ===== CORS =====
   const corsOriginsEnv = (process.env.CORS_ORIGINS ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
 
   const isProd = (process.env.NODE_ENV ?? '').toLowerCase() === 'production';
-  
-  // Log CORS configuration for debugging
-  console.log(`[CORS] Environment: ${process.env.NODE_ENV}`);
-  console.log(`[CORS] Allowed Origins: ${corsOriginsEnv.length ? corsOriginsEnv.join(', ') : 'None (Strict Mode)'}`);
+
+  console.log('[CORS] Environment:', process.env.NODE_ENV);
+  console.log('[CORS] Allowed Origins:', corsOriginsEnv.length ? corsOriginsEnv : 'NONE');
 
   app.enableCors({
     origin: (
       origin: string | undefined,
       cb: (err: Error | null, allow?: boolean) => void,
     ) => {
-      // Allow requests with no origin (like mobile apps or curl requests)
+      // Permitir requests sin origin (Flutter, curl, Postman)
       if (!origin) return cb(null, true);
 
-      // Allow if explicitly listed or if wildcard '*' is present
-      if (corsOriginsEnv.includes('*') || corsOriginsEnv.includes(origin)) {
-        return cb(null, true);
+      // Permitir wildcard
+      if (corsOriginsEnv.includes('*')) return cb(null, true);
+
+      // Permitir si está en la lista
+      if (corsOriginsEnv.includes(origin)) return cb(null, true);
+
+      // Permitir red local SOLO en no-producción
+      if (!isProd) {
+        try {
+          const hostname = new URL(origin).hostname;
+          if (
+            hostname === 'localhost' ||
+            hostname === '127.0.0.1' ||
+            hostname.startsWith('192.168.') ||
+            hostname.startsWith('10.') ||
+            hostname.startsWith('172.')
+          ) {
+            return cb(null, true);
+          }
+        } catch {}
       }
 
-      try {
-        const url = new URL(origin);
-        const hostname = url.hostname;
-        
-        const isLocalNetwork = 
-          hostname === 'localhost' ||
-          hostname === '127.0.0.1' ||
-          hostname === '10.0.2.2' ||
-          hostname.startsWith('192.168.') ||
-          hostname.startsWith('10.') ||
-          hostname.startsWith('172.');
-
-        // Allow local network in non-production environments
-        if (!isProd && isLocalNetwork) {
-          return cb(null, true);
-        }
-      } catch {}
-
-      // Log the blocked origin to help debugging
-      console.error(`[CORS] Blocked request from origin: '${origin}'. Allowed origins: ${JSON.stringify(corsOriginsEnv)}`);
-      
+      console.error(`[CORS] Blocked origin: ${origin}`);
       return cb(new Error(`Not allowed by CORS: ${origin}`));
     },
     credentials: true,
@@ -86,16 +90,30 @@ async function bootstrap() {
     optionsSuccessStatus: 204,
     maxAge: 86400,
   });
-  // Webhook de Stripe necesita el body RAW para verificar firmas
-  app.use('/api/pagos/webhook', express.raw({ type: 'application/json' }));
-  
-  // Servir archivos estáticos desde public/uploads
-  // NOTA: ServeStaticModule en AppModule ya maneja esto desde la raíz 'public'
-  // app.use('/uploads', express.static(join(process.cwd(), 'public', 'uploads')));
-  
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
-  const port = Number(process.env.PORT ?? 3001);
+  console.log('✅ CORS enabled');
+
+  // ===== STRIPE WEBHOOK (RAW BODY) =====
+  app.use('/api/pagos/webhook', express.raw({ type: 'application/json' }));
+  console.log('✅ Stripe webhook configured');
+
+  // ===== VALIDATION =====
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      transform: true,
+    }),
+  );
+  console.log('✅ Global validation pipes enabled');
+
+  // ===== START SERVER (CRÍTICO) =====
+  const port = Number(process.env.PORT) || 3001;
+  console.log(`🚀 Server listening on 0.0.0.0:${port}`);
+
   await app.listen(port, '0.0.0.0');
 }
-bootstrap();
+
+bootstrap().catch((err) => {
+  console.error('❌ Bootstrap failed', err);
+  process.exit(1);
+});
